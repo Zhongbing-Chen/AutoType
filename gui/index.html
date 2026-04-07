@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VocoType - 语音转文字</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <h1>VocoType</h1>
+      <p class="subtitle">语音转文字</p>
+    </header>
+
+    <main class="main-content">
+      <!-- 录音控制 -->
+      <div class="control-section">
+        <button id="recordBtn" class="record-btn">
+          <span class="icon">🎤</span>
+          <span class="text">开始录音</span>
+        </button>
+        <div id="status" class="status">就绪 (按 F2 开始)</div>
+      </div>
+
+      <!-- 当前结果 -->
+      <div class="result-section">
+        <h2>当前状态</h2>
+        <div id="result" class="result-text">点击按钮或按 F2 开始录音</div>
+      </div>
+
+      <!-- 历史记录 -->
+      <div class="history-section">
+        <h2>历史记录</h2>
+        <div id="historyList" class="history-list">
+          <div class="empty">暂无录音记录</div>
+        </div>
+      </div>
+
+      <!-- 设备检测 -->
+      <div class="info-section">
+        <button id="checkAudioBtn" class="check-btn">检测音频设备</button>
+        <pre id="audioDevices" class="device-list"></pre>
+      </div>
+
+      <!-- 保存位置 -->
+      <div class="info-section">
+        <div id="recordingsDir" class="recordings-dir">加载中...</div>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

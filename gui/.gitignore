@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+src-tauri/src-nodejs/node_modules/
+
+# Build outputs
+dist/
+target/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Audio recordings (user data)
+recordings/
+
+# Environment
+.env
+.env.local
+
+# Model files (large binaries)
+*.bin
+*.onnx
+models/
+
+# Temporary files
+uploads/
+*.tmp
