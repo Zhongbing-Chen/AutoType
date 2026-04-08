@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recording Overlay</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    .overlay-container {
+      width: 300px;
+      height: 100px;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(10px);
+      border-radius: 16px;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .recording-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .recording-dot {
+      width: 12px;
+      height: 12px;
+      background: #ef4444;
+      border-radius: 50%;
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.2); }
+    }
+
+    .recording-text {
+      color: #f1f5f9;
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .waveform {
+      width: 260px;
+      height: 40px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    .hint {
+      color: #94a3b8;
+      font-size: 11px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="overlay-container">
+    <div class="recording-indicator">
+      <div class="recording-dot"></div>
+      <span class="recording-text">正在录音</span>
+    </div>
+    <div class="waveform">
+      <canvas id="waveformCanvas" width="260" height="40"></canvas>
+    </div>
+    <div class="hint">按 F4 停止</div>
+  </div>
+
+  <script type="module">
+    import { listen } from '@tauri-apps/api/event';
+
+    const canvas = document.getElementById('waveformCanvas');
+    const ctx = canvas.getContext('2d');
+    const amplitudeHistory = new Array(40).fill(0);
+
+    // 监听来自Rust的振幅数据
+    listen('audio-amplitude', (event) => {
+      const amp = event.payload;
+      if (typeof amp === 'number') {
+        amplitudeHistory.push(amp);
+        amplitudeHistory.shift();
+      }
+    });
+
+    // 动画循环
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const barWidth = canvas.width / amplitudeHistory.length;
+      const centerY = canvas.height / 2;
+
+      amplitudeHistory.forEach((amp, i) => {
+        // 添加波动效果
+        const animatedAmp = amp * (0.7 + Math.random() * 0.6);
+        const barHeight = Math.max(2, animatedAmp * canvas.height * 0.8);
+
+        const x = i * barWidth;
+        const y = centerY - barHeight / 2;
+
+        // 渐变色
+        const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        gradient.addColorStop(0, '#3b82f6');
+        gradient.addColorStop(0.5, '#8b5cf6');
+        gradient.addColorStop(1, '#3b82f6');
+
+        ctx.fillStyle = gradient;
+        ctx.fillRect(x + 1, y, barWidth - 2, barHeight);
+      });
+
+      requestAnimationFrame(draw);
+    }
+
+    draw();
+  </script>
+</body>
+</html>

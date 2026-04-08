@@ -3,30 +3,36 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VocoType - 语音转文字</title>
+  <title>AutoType - 语音转文字</title>
   <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
   <div id="app">
     <header class="header">
-      <h1>VocoType</h1>
-      <p class="subtitle">语音转文字</p>
+      <h1>AutoType</h1>
+      <p class="subtitle">按住 F4 录音，松开自动识别</p>
+      <button id="settingsBtn" class="settings-btn" title="设置">⚙️</button>
     </header>
 
     <main class="main-content">
-      <!-- 录音控制 -->
+      <!-- 录音状态指示器 -->
       <div class="control-section">
-        <button id="recordBtn" class="record-btn">
-          <span class="icon">🎤</span>
-          <span class="text">开始录音</span>
-        </button>
-        <div id="status" class="status">就绪 (按 F2 开始)</div>
+        <div id="recordingIndicator" class="recording-indicator clickable" title="点击开始/停止录音">
+          <div class="mic-icon">🎤</div>
+          <!-- 声纹可视化 -->
+          <div id="waveform" class="waveform-container" style="display:none;">
+            <canvas id="waveformCanvas" width="200" height="60"></canvas>
+          </div>
+          <div class="recording-status">就绪</div>
+          <div class="recording-hint">点击或按 F4 开始录音</div>
+        </div>
       </div>
 
       <!-- 当前结果 -->
       <div class="result-section">
-        <h2>当前状态</h2>
-        <div id="result" class="result-text">点击按钮或按 F2 开始录音</div>
+        <h2>识别结果</h2>
+        <div id="result" class="result-text">按住 F4 说话，松开自动转文字</div>
+        <button id="copyBtn" class="copy-btn" style="display:none;">复制文本</button>
       </div>
 
       <!-- 历史记录 -->
@@ -36,18 +42,70 @@
           <div class="empty">暂无录音记录</div>
         </div>
       </div>
-
-      <!-- 设备检测 -->
-      <div class="info-section">
-        <button id="checkAudioBtn" class="check-btn">检测音频设备</button>
-        <pre id="audioDevices" class="device-list"></pre>
-      </div>
-
-      <!-- 保存位置 -->
-      <div class="info-section">
-        <div id="recordingsDir" class="recordings-dir">加载中...</div>
-      </div>
     </main>
+
+    <!-- 设置面板 -->
+    <div id="settingsPanel" class="settings-panel">
+      <div class="settings-header">
+        <h2>设置</h2>
+        <button id="closeSettings" class="close-btn">✕</button>
+      </div>
+
+      <div class="settings-content">
+        <!-- 快捷键设置 -->
+        <div class="setting-item">
+          <label>录音快捷键</label>
+          <div class="hotkey-input">
+            <input type="text" id="hotkeyInput" value="F4" readonly>
+            <button id="changeHotkeyBtn">修改</button>
+          </div>
+          <p class="setting-desc">按住此键录音，松开自动识别</p>
+        </div>
+
+        <!-- 保存录音 -->
+        <div class="setting-item">
+          <label class="checkbox-label">
+            <input type="checkbox" id="saveRecordingsCheck" checked>
+            <span>保存录音文件</span>
+          </label>
+          <p class="setting-desc">录音将保存为 WAV 文件，便于后续查看</p>
+        </div>
+
+        <!-- 自动识别 -->
+        <div class="setting-item">
+          <label class="checkbox-label">
+            <input type="checkbox" id="autoTranscribeCheck" checked>
+            <span>自动语音识别</span>
+          </label>
+          <p class="setting-desc">录音结束后自动开始识别</p>
+        </div>
+
+        <!-- 保存路径 -->
+        <div class="setting-item">
+          <label>录音保存路径</label>
+          <div class="path-input">
+            <input type="text" id="recordingsPathInput" readonly>
+            <button id="browsePathBtn">浏览</button>
+          </div>
+        </div>
+
+        <!-- 音频设备检测 -->
+        <div class="setting-item">
+          <label>音频设备</label>
+          <button id="checkAudioBtn" class="check-btn">检测音频设备</button>
+          <pre id="audioDevices" class="device-list"></pre>
+        </div>
+
+        <!-- 保存按钮 -->
+        <div class="setting-actions">
+          <button id="saveSettingsBtn" class="primary-btn">保存设置</button>
+          <button id="resetSettingsBtn" class="secondary-btn">恢复默认</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 遮罩层 -->
+    <div id="overlay" class="overlay"></div>
   </div>
 
   <script type="module" src="/src/main.js"></script>

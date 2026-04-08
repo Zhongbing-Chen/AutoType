@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{Manager, State, GlobalShortcutManager, AppHandle};
+use tauri::{Manager, State, GlobalShortcutManager};
 use std::sync::{Arc, Mutex};
 use std::process::{Command, Stdio};
 use std::io::Write;
@@ -112,19 +112,16 @@ fn check_audio_devices() -> Result<String, String> {
     Ok(result)
 }
 
-// 修复后的音频采集模块 - 使用相位累积避免长时间漂移
+// 音频采集模块 - 使用消息传递架构避免 Send  trait 问题
 mod audio {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use cpal::StreamConfig;
-    use std::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
+    use cpal::{Stream, StreamConfig};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::sync::mpsc::{sync_channel, SyncSender, Receiver};
+    use std::sync::mpsc::{channel, Sender, Receiver};
     use hound::{WavSpec, WavWriter};
     use std::path::PathBuf;
     use std::thread::{self, JoinHandle};
-
-    // 最大录音时长：10分钟
-    const MAX_RECORDING_SAMPLES: usize = 16000 * 60 * 10;
 
     pub enum AudioCommand {
         Start,
@@ -132,9 +129,8 @@ mod audio {
     }
 
     pub struct AudioRecorder {
-        cmd_sender: SyncSender<AudioCommand>,
+        cmd_sender: Sender<AudioCommand>,
         data_receiver: Receiver<Vec<i16>>,
-        amp_receiver: Receiver<f32>,
         is_recording: Arc<AtomicBool>,
         _thread_handle: Option<JoinHandle<()>>,
         sample_rate: u32,
@@ -142,22 +138,21 @@ mod audio {
 
     impl AudioRecorder {
         pub fn new() -> Result<Self, String> {
-            let (cmd_sender, cmd_receiver) = sync_channel(1);
-            let (data_sender, data_receiver) = sync_channel(1);
-            let (amp_sender, amp_receiver) = sync_channel(100);
+            let (cmd_sender, cmd_receiver): (Sender<AudioCommand>, Receiver<AudioCommand>) = channel();
+            let (data_sender, data_receiver): (Sender<Vec<i16>>, Receiver<Vec<i16>>) = channel();
             let is_recording = Arc::new(AtomicBool::new(false));
             let is_recording_thread = is_recording.clone();
 
             let thread_handle = thread::spawn(move || {
-                AudioRecorder::audio_thread(cmd_receiver, data_sender, amp_sender, is_recording_thread);
+                AudioRecorder::audio_thread(cmd_receiver, data_sender, is_recording_thread);
             });
 
+            // 等待一小段时间让音频线程初始化
             thread::sleep(std::time::Duration::from_millis(100));
 
             Ok(Self {
                 cmd_sender,
                 data_receiver,
-                amp_receiver,
                 is_recording,
                 _thread_handle: Some(thread_handle),
                 sample_rate: 16000,
@@ -166,25 +161,55 @@ mod audio {
 
         fn audio_thread(
             cmd_receiver: Receiver<AudioCommand>,
-            data_sender: SyncSender<Vec<i16>>,
-            amp_sender: SyncSender<f32>,
+            data_sender: Sender<Vec<i16>>,
             is_recording: Arc<AtomicBool>,
         ) {
             use cpal::traits::DeviceTrait;
             let host = cpal::default_host();
             println!("音频线程: 使用主机 {:?}", host.id());
 
-            let device = loop {
+            // 带重试的设备获取
+            let mut device: Option<cpal::Device> = None;
+            for attempt in 0..3 {
+                // 尝试获取默认设备
                 if let Some(d) = host.default_input_device() {
-                    break d;
+                    device = Some(d);
+                    break;
                 }
-                if let Ok(mut devices) = host.input_devices() {
-                    if let Some(d) = devices.next() {
-                        break d;
+
+                // 如果没有默认设备，尝试列表中的第一个
+                match host.input_devices() {
+                    Ok(mut devices) => {
+                        if let Some(d) = devices.next() {
+                            device = Some(d);
+                            break;
+                        }
                     }
+                    Err(e) => println!("音频线程: 无法枚举输入设备: {}", e),
                 }
-                println!("音频线程: 未找到设备，等待重试...");
-                thread::sleep(std::time::Duration::from_millis(500));
+
+                if attempt < 2 {
+                    println!("音频线程: 未找到设备，等待重试...");
+                    thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+
+            let device = match device {
+                Some(d) => d,
+                None => {
+                    eprintln!("[ERROR] 音频线程: 未找到可用输入设备，音频功能将不可用");
+                    eprintln!("[HINT] 请检查: 1. 麦克风是否连接 2. 麦克风权限是否开启 3. 是否有其他应用占用麦克风");
+                    // 进入空循环，保持通道开启但什么都不做
+                    loop {
+                        match cmd_receiver.recv() {
+                            Ok(_) => {
+                                let _ = data_sender.send(Vec::new());
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    return;
+                }
             };
 
             let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
@@ -198,85 +223,21 @@ mod audio {
                 }
             };
 
-            let final_buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(16000 * 60)));
-            let sample_count = Arc::new(AtomicUsize::new(0));
-
-            // 重采样参数
-            let target_sr = 16000f64;
-            let source_sr = config.sample_rate.0 as f64;
-            let ratio = target_sr / source_sr; // 输出/输入比率
-
-            println!("音频线程: {}Hz -> {}Hz, ratio={}", source_sr, target_sr, ratio);
-
+            let recorded_data = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded_data_stream = recorded_data.clone();
             let is_recording_stream = is_recording.clone();
-            let final_buffer_stream = final_buffer.clone();
-            let sample_count_stream = sample_count.clone();
-            let amp_sender_stream = amp_sender.clone();
-
-            // 重采样状态：相位累积
-            let mut phase: f64 = 0.0;
 
             let stream = match device.build_input_stream(
                 &config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    if !is_recording_stream.load(Ordering::SeqCst) {
-                        return;
-                    }
-
-                    // 计算振幅用于可视化
-                    if !data.is_empty() {
-                        let sum: i64 = data.iter().map(|&s| (s as i64).abs()).sum();
-                        let avg_amp = (sum as f32 / data.len() as f32) / 32768.0;
-                        let _ = amp_sender_stream.try_send(avg_amp.min(1.0));
-                    }
-
-                    if (source_sr - target_sr).abs() < 1.0 {
-                        // 无需重采样
-                        if let Ok(mut buffer) = final_buffer_stream.lock() {
-                            let count = sample_count_stream.load(Ordering::Relaxed);
-                            let space = MAX_RECORDING_SAMPLES.saturating_sub(count);
-                            let to_add = data.len().min(space);
-                            if to_add > 0 {
-                                buffer.extend_from_slice(&data[..to_add]);
-                                sample_count_stream.store(buffer.len(), Ordering::Relaxed);
-                            }
-                        }
-                    } else {
-                        // 需要重采样 - 使用相位累积进行高质量重采样
-                        if let Ok(mut buffer) = final_buffer_stream.lock() {
-                            let input_len = data.len() as f64;
-
-                            while phase < input_len {
-                                // 计算插值位置
-                                let idx = phase as usize;
-                                let frac = phase - idx as f64;
-
-                                if idx + 1 < data.len() {
-                                    // 线性插值
-                                    let s0 = data[idx] as f64;
-                                    let s1 = data[idx + 1] as f64;
-                                    let sample = (s0 + frac * (s1 - s0)) as i16;
-                                    buffer.push(sample);
-                                } else if idx < data.len() {
-                                    buffer.push(data[idx]);
-                                }
-
-                                phase += 1.0 / ratio; // 按比率前进
-
-                                // 检查是否超过最大长度
-                                if buffer.len() >= MAX_RECORDING_SAMPLES {
-                                    break;
-                                }
-                            }
-
-                            // 保存剩余相位，处理进位
-                            phase -= input_len;
-                            sample_count_stream.store(buffer.len(), Ordering::Relaxed);
+                    if is_recording_stream.load(Ordering::SeqCst) {
+                        if let Ok(mut buffer) = recorded_data_stream.lock() {
+                            buffer.extend_from_slice(data);
                         }
                     }
                 },
                 |err| eprintln!("音频流错误: {}", err),
-                Some(std::time::Duration::from_millis(1000)),
+                None,
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -285,40 +246,35 @@ mod audio {
                 }
             };
 
-            let _ = stream.play();
-            let _ = stream.pause();
-            println!("音频线程: 音频流已准备");
-
+            // 主循环：处理命令
             loop {
                 match cmd_receiver.recv() {
                     Ok(AudioCommand::Start) => {
-                        if let Ok(mut buffer) = final_buffer.lock() {
-                            buffer.clear();
+                        // 清空之前的数据
+                        if let Ok(mut data) = recorded_data.lock() {
+                            data.clear();
                         }
-                        sample_count.store(0, Ordering::Relaxed);
-                        phase = 0.0;
                         is_recording.store(true, Ordering::SeqCst);
                         let _ = stream.play();
-                        println!("音频线程: 录音开始");
+                        println!("音频线程: 录音已开始");
                     }
                     Ok(AudioCommand::Stop) => {
                         is_recording.store(false, Ordering::SeqCst);
                         let _ = stream.pause();
 
-                        let recorded = if let Ok(data) = final_buffer.lock() {
+                        let recorded = if let Ok(data) = recorded_data.lock() {
                             data.clone()
                         } else {
                             Vec::new()
                         };
 
-                        println!("音频线程: 录音停止，{} 样本 ({}秒)",
-                            recorded.len(), recorded.len() / 16000);
-
-                        if data_sender.try_send(recorded).is_err() {
-                            let _ = data_sender.try_send(Vec::new());
-                        }
+                        println!("音频线程: 录音已停止，采集 {} 样本", recorded.len());
+                        let _ = data_sender.send(recorded);
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        println!("音频线程: 命令通道关闭，退出");
+                        break;
+                    }
                 }
             }
         }
@@ -327,16 +283,18 @@ mod audio {
             self.is_recording.load(Ordering::SeqCst)
         }
 
-        pub fn try_get_amplitude(&self) -> Option<f32> {
-            self.amp_receiver.try_recv().ok()
-        }
-
         pub fn start_recording(&self) -> Result<(), String> {
             if self.is_recording() {
                 return Ok(());
             }
-            self.cmd_sender.send(AudioCommand::Start)
-                .map_err(|_| "音频线程通信失败".to_string())
+            // 检查音频线程是否存活（通过发送测试命令）
+            match self.cmd_sender.send(AudioCommand::Start) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    eprintln!("音频线程通信失败: {:?}", e);
+                    Err("音频设备初始化失败，请检查麦克风连接或重启应用".to_string())
+                }
+            }
         }
 
         pub fn stop_recording(&self) -> Result<Vec<i16>, String> {
@@ -344,22 +302,17 @@ mod audio {
                 return Ok(Vec::new());
             }
 
-            while self.data_receiver.try_recv().is_ok() {}
-
             self.cmd_sender.send(AudioCommand::Stop)
                 .map_err(|e| format!("发送停止命令失败: {}", e))?;
 
-            match self.data_receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            // 等待数据返回（最多等待2秒）
+            match self.data_receiver.recv_timeout(std::time::Duration::from_secs(2)) {
                 Ok(data) => Ok(data),
                 Err(_) => Err("接收音频数据超时".to_string()),
             }
         }
 
         pub fn save_to_wav(&self, data: &[i16], path: &PathBuf) -> Result<(), String> {
-            if data.is_empty() {
-                return Err("没有音频数据".to_string());
-            }
-
             let spec = WavSpec {
                 channels: 1,
                 sample_rate: self.sample_rate,
@@ -379,6 +332,7 @@ mod audio {
         }
     }
 }
+
 // 应用状态
 struct AppState {
     is_recording: Mutex<bool>,
@@ -546,10 +500,8 @@ fn transcribe_with_nodejs(wav_path: &PathBuf) -> Result<String, String> {
     }
 
     // 调用 Node.js 服务进行转录
-    // 将 Windows 反斜杠路径转换为正斜杠，避免 JSON 转义问题
-    let audio_path_str = wav_path.to_string_lossy().to_string().replace("\\", "/");
     let request_body = serde_json::json!({
-        "audioPath": audio_path_str
+        "audioPath": wav_path.to_string_lossy().to_string()
     });
     let output = Command::new("curl")
         .args([
@@ -599,15 +551,6 @@ fn transcribe_with_python(wav_path: &PathBuf) -> Result<String, String> {
     };
 
     for py_cmd in &python_cmds {
-        // 将路径转换为正斜杠避免转义问题
-        let cli_path = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("autotype").join("cli")
-            .to_string_lossy().to_string().replace("\\", "/");
-        let audio_path = wav_path.to_string_lossy().to_string().replace("\\", "/");
-
         let output = Command::new(py_cmd)
             .arg("-c")
             .arg(format!(
@@ -623,8 +566,13 @@ except Exception as ex:
     print(f'ERROR: {{ex}}', file=sys.stderr)
     sys.exit(1)
 "#,
-                cli_path,
-                audio_path
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("autotype").join("cli")
+                    .to_string_lossy(),
+                wav_path.to_string_lossy()
             ))
             .output();
 
@@ -713,52 +661,6 @@ fn get_recordings_dir(state: State<AppState>) -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
-// 获取音频振幅（用于声纹可视化）
-#[tauri::command]
-fn get_audio_amplitude(state: State<AppState>) -> Result<f32, String> {
-    let recorder = state.recorder.lock().map_err(|e| e.to_string())?;
-    Ok(recorder.try_get_amplitude().unwrap_or(0.0))
-}
-
-// 打开录音文件所在目录
-#[tauri::command]
-fn open_recording_folder(state: State<AppState>, id: String) -> Result<(), String> {
-    let recordings_dir = state.recordings_dir.lock().map_err(|e| e.to_string())?;
-    let wav_path = recordings_dir.join(format!("{}.wav", id));
-
-    if !wav_path.exists() {
-        return Err("录音文件不存在".to_string());
-    }
-
-    // 获取文件所在目录
-    let folder_path = wav_path.parent()
-        .ok_or("无法获取文件目录")?;
-
-    // 使用系统默认程序打开目录
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer")
-            .args([folder_path])
-            .spawn();
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .args([folder_path])
-            .spawn();
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open")
-            .args([folder_path])
-            .spawn();
-    }
-
-    Ok(())
-}
-
 // 启动 Node.js ASR 服务
 fn start_nodejs_service() {
     use std::process::{Command, Stdio};
@@ -824,127 +726,38 @@ fn main() {
             get_recordings,
             transcribe_recording,
             get_recordings_dir,
-            check_audio_devices,
-            open_recording_folder,
-            get_audio_amplitude
+            check_audio_devices
         ])
         .setup(|app| {
-            // 注册全局快捷键 F4
+            // 注册全局快捷键 F2
             let handle = app.handle();
             let mut shortcut_manager = app.global_shortcut_manager();
 
-            // 尝试注册 F4，失败则尝试 F2/F3 作为备用
-            let f4_result = shortcut_manager.register("F4", move || {
-                println!("快捷键 F4 被按下");
+            // 尝试注册 F2，失败则尝试 F3
+            let f2_result = shortcut_manager.register("F2", move || {
                 let state: State<AppState> = handle.state();
-                match toggle_recording(state) {
-                    Ok(is_recording) => {
-                        println!("快捷键 F4: 录音状态切换为 {}", is_recording);
-                        // 发送事件到前端更新 UI
-                        if let Err(e) = handle.emit_all("recording-status-change", serde_json::json!({
-                            "recording": is_recording
-                        })) {
-                            eprintln!("发送事件失败: {}", e);
-                        } else {
-                            println!("事件已发送: recording-status-change, recording={}", is_recording);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("快捷键 F4: 切换录音状态失败: {}", e);
-                    }
+                if let Ok(is_recording) = toggle_recording(state) {
+                    println!("快捷键 F2 触发，录音状态: {}", is_recording);
                 }
             });
 
-            match f4_result {
-                Ok(_) => println!("✓ 全局快捷键 F4 已注册"),
+            match f2_result {
+                Ok(_) => println!("✓ 全局快捷键 F2 已注册"),
                 Err(e) => {
-                    println!("✗ 无法注册 F4: {}", e);
-                    println!("  尝试注册 F2 作为备用...");
+                    println!("✗ 无法注册 F2: {}", e);
+                    println!("  尝试注册 F3 作为备用...");
 
                     let handle2 = app.handle();
-                    match app.global_shortcut_manager().register("F2", move || {
+                    match app.global_shortcut_manager().register("F3", move || {
                         let state: State<AppState> = handle2.state();
                         if let Ok(is_recording) = toggle_recording(state) {
-                            println!("快捷键 F2 触发，录音状态: {}", is_recording);
-                            let _ = handle2.emit_all("recording-status-change", serde_json::json!({
-                                "recording": is_recording
-                            }));
+                            println!("快捷键 F3 触发，录音状态: {}", is_recording);
                         }
                     }) {
-                        Ok(_) => println!("✓ 全局快捷键 F2 已注册（备用）"),
-                        Err(e2) => {
-                            println!("✗ 也无法注册 F2: {}", e2);
-                            println!("  尝试注册 F3...");
-
-                            let handle3 = app.handle();
-                            let _ = app.global_shortcut_manager().register("F3", move || {
-                                let state: State<AppState> = handle3.state();
-                                if let Ok(is_recording) = toggle_recording(state) {
-                                    println!("快捷键 F3 触发，录音状态: {}", is_recording);
-                                    let _ = handle3.emit_all("recording-status-change", serde_json::json!({
-                                        "recording": is_recording
-                                    }));
-                                }
-                            });
-                        }
+                        Ok(_) => println!("✓ 全局快捷键 F3 已注册（备用）"),
+                        Err(e2) => println!("✗ 也无法注册 F3: {}", e2),
                     }
                 }
-            }
-
-            // 创建桌面悬浮窗口（用于显示声纹）
-            let overlay_window = tauri::WindowBuilder::new(
-                app,
-                "overlay",
-                tauri::WindowUrl::App("/overlay.html".into())
-            )
-            .title("")
-            .inner_size(300.0, 100.0)
-            .position(100.0, 100.0)
-            .always_on_top(true)
-            .transparent(true)
-            .decorations(false)
-            .skip_taskbar(true)
-            .resizable(false)
-            .visible(false)
-            .build();
-
-            if let Ok(overlay) = overlay_window {
-                let overlay_handle = overlay.clone();
-                let app_handle = app.handle();
-
-                // 监听录音状态变化，控制悬浮窗口显示
-                std::thread::spawn(move || {
-                    let mut was_recording = false;
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-
-                        let state: State<AppState> = app_handle.state();
-                        let is_recording = state.is_recording.lock()
-                            .map(|v| *v)
-                            .unwrap_or(false);
-
-                        if is_recording != was_recording {
-                            was_recording = is_recording;
-                            if is_recording {
-                                let _ = overlay_handle.show();
-                                let _ = overlay_handle.set_focus();
-                            } else {
-                                let _ = overlay_handle.hide();
-                            }
-                        }
-
-                        // 如果正在录音，发送振幅数据到悬浮窗口
-                        if is_recording {
-                            if let Ok(recorder) = state.recorder.lock() {
-                                if let Some(amp) = recorder.try_get_amplitude() {
-                                    let _ = overlay_handle.emit("audio-amplitude", amp);
-                                }
-                            }
-                        }
-                    }
-                });
-            } else if let Err(e) = overlay_window {
-                eprintln!("创建悬浮窗口失败: {}", e);
             }
 
             Ok(())
