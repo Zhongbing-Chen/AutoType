@@ -176,16 +176,35 @@ mod audio {
 
             let mut device = None;
             for attempt in 0..5 {
-                if let Some(d) = host.default_input_device() {
-                    device = Some(d);
-                    break;
-                }
-                if let Ok(mut devices) = host.input_devices() {
-                    if let Some(d) = devices.next() {
+                // 尝试默认设备
+                match host.default_input_device() {
+                    Some(d) => {
+                        println!("音频线程: 找到默认输入设备");
                         device = Some(d);
                         break;
                     }
+                    None => println!("音频线程: 无默认输入设备"),
                 }
+
+                // 尝试枚举设备
+                match host.input_devices() {
+                    Ok(mut devices) => {
+                        let count = devices.by_ref().count();
+                        println!("音频线程: 找到 {} 个输入设备", count);
+
+                        if count > 0 {
+                            // 重新获取迭代器
+                            if let Ok(mut devices2) = host.input_devices() {
+                                if let Some(d) = devices2.next() {
+                                    device = Some(d);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => println!("音频线程: 枚举设备失败: {}", e),
+                }
+
                 println!("音频线程: 未找到设备，重试 {}/5...", attempt + 1);
                 thread::sleep(std::time::Duration::from_millis(500));
             }
