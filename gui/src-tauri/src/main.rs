@@ -518,7 +518,12 @@ fn transcribe_recording(state: State<AppState>, id: String) -> Result<String, St
 
     let result_text = match result {
         Ok(text) if text.is_empty() => "[识别结果为空]".to_string(),
-        Ok(text) => text,
+        Ok(text) => {
+            // 自动输入到当前焦点窗口
+            println!("识别结果: {}，正在自动输入...", text);
+            auto_type_text(&text);
+            text
+        }
         Err(_) => "[识别失败]".to_string(),
     };
 
@@ -718,6 +723,70 @@ fn get_recordings_dir(state: State<AppState>) -> Result<String, String> {
 fn get_audio_amplitude(state: State<AppState>) -> Result<f32, String> {
     let recorder = state.recorder.lock().map_err(|e| e.to_string())?;
     Ok(recorder.try_get_amplitude().unwrap_or(0.0))
+}
+
+// 自动输入文本到当前焦点窗口（Windows API）
+#[cfg(target_os = "windows")]
+fn auto_type_text(text: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    // 将文本转换为宽字符
+    let wide: Vec<u16> = OsStr::new(text).encode_wide().chain(Some(0)).collect();
+
+    for chunk in wide.chunks(32) {
+        if chunk.is_empty() {
+            break;
+        }
+
+        // 使用 SendInput 发送按键
+        let mut inputs: Vec<windows::Win32::UI::Input::KeyboardAndMouse::INPUT> = Vec::new();
+
+        for &c in chunk {
+            if c == 0 {
+                continue;
+            }
+
+            // 按键按下
+            let mut input_down = windows::Win32::UI::Input::KeyboardAndMouse::INPUT::default();
+            input_down.r#type = windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD;
+            input_down.Anonymous.ki = windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                wScan: c,
+                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_UNICODE,
+                time: 0,
+                dwExtraInfo: 0,
+            };
+            inputs.push(input_down);
+
+            // 按键释放
+            let mut input_up = windows::Win32::UI::Input::KeyboardAndMouse::INPUT::default();
+            input_up.r#type = windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD;
+            input_up.Anonymous.ki = windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                wScan: c,
+                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_UNICODE | windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            };
+            inputs.push(input_up);
+        }
+
+        unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
+                &inputs,
+                std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::INPUT>() as i32,
+            );
+        }
+
+        // 小延迟确保输入顺序
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn auto_type_text(_text: &str) {
+    // 非 Windows 平台暂不支持
 }
 
 // 打开录音文件所在目录
@@ -946,6 +1015,77 @@ fn main() {
             } else if let Err(e) = overlay_window {
                 eprintln!("创建悬浮窗口失败: {}", e);
             }
+
+            // 使用 rdev 监听 F4 按住/松开（实现按住录音模式）
+            let handle = app.handle();
+            std::thread::spawn(move || {
+                use rdev::{listen, EventType, Key};
+
+                let handle_for_keydown = handle.clone();
+                let handle_for_keyup = handle.clone();
+                let mut is_pressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let is_pressed_clone = is_pressed.clone();
+
+                if let Err(e) = listen(move |event| {
+                    match event.event_type {
+                        EventType::KeyPress(Key::F4) => {
+                            if !is_pressed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                // F4 刚按下，开始录音
+                                println!("rdev: F4 按下，开始录音");
+                                let state: State<AppState> = handle_for_keydown.state();
+                                if let Ok(false) = state.is_recording.lock().map(|v| *v) {
+                                    let recorder = state.recorder.lock().unwrap();
+                                    if recorder.start_recording().is_ok() {
+                                        *state.is_recording.lock().unwrap() = true;
+                                        let _ = handle_for_keydown.emit_all("recording-status-change",
+                                            serde_json::json!({"recording": true }));
+                                    }
+                                }
+                            }
+                        }
+                        EventType::KeyRelease(Key::F4) => {
+                            if is_pressed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                                // F4 松开，停止录音
+                                println!("rdev: F4 松开，停止录音");
+                                let state: State<AppState> = handle_for_keyup.state();
+                                if let Ok(true) = state.is_recording.lock().map(|v| *v) {
+                                    let recorder = state.recorder.lock().unwrap();
+                                    if let Ok(audio_data) = recorder.stop_recording() {
+                                        *state.is_recording.lock().unwrap() = false;
+
+                                        // 保存录音
+                                        if !audio_data.is_empty() {
+                                            let recordings_dir = state.recordings_dir.lock().unwrap();
+                                            let id = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                                            let wav_path = recordings_dir.join(format!("{}.wav", id));
+                                            let _ = recorder.save_to_wav(&audio_data, &wav_path);
+                                            let txt_path = recordings_dir.join(format!("{}.txt", id));
+                                            let _ = std::fs::write(&txt_path, "[识别中...]");
+
+                                            // 触发识别
+                                            let id_clone = id.clone();
+                                            let handle_clone = handle_for_keyup.clone();
+                                            std::thread::spawn(move || {
+                                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                                let state: State<AppState> = handle_clone.state();
+                                                let _ = transcribe_recording(state, id_clone);
+                                                let _ = handle_clone.emit_all("recording-saved",
+                                                    serde_json::json!({"id": id }));
+                                            });
+                                        }
+
+                                        let _ = handle_for_keyup.emit_all("recording-status-change",
+                                            serde_json::json!({"recording": false }));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }) {
+                    eprintln!("rdev 监听失败: {:?}", e);
+                }
+            });
 
             Ok(())
         })

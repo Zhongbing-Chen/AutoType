@@ -38,6 +38,9 @@ dirs = "5.0"
 # 全局键盘监听
 rdev = "0.5"
 
+# Windows API
+windows = { version = "0.52", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
