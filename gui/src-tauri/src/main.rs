@@ -174,17 +174,38 @@ mod audio {
             let host = cpal::default_host();
             println!("音频线程: 使用主机 {:?}", host.id());
 
-            let device = loop {
+            let mut device = None;
+            for attempt in 0..5 {
                 if let Some(d) = host.default_input_device() {
-                    break d;
+                    device = Some(d);
+                    break;
                 }
                 if let Ok(mut devices) = host.input_devices() {
                     if let Some(d) = devices.next() {
-                        break d;
+                        device = Some(d);
+                        break;
                     }
                 }
-                println!("音频线程: 未找到设备，等待重试...");
+                println!("音频线程: 未找到设备，重试 {}/5...", attempt + 1);
                 thread::sleep(std::time::Duration::from_millis(500));
+            }
+
+            let device = match device {
+                Some(d) => d,
+                None => {
+                    eprintln!("音频线程: 无法找到音频输入设备");
+                    // 发送空数据保持通道开启
+                    loop {
+                        match cmd_receiver.recv() {
+                            Ok(_) => {
+                                let _ = data_sender.try_send(Vec::new());
+                                let _ = amp_sender.try_send(0.0);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    return;
+                }
             };
 
             let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
@@ -1033,9 +1054,11 @@ fn main() {
                                 // F4 刚按下，开始录音
                                 println!("rdev: F4 按下，开始录音");
                                 let state: State<AppState> = handle_for_keydown.state();
-                                if let Ok(false) = state.is_recording.lock().map(|v| *v) {
+                                let is_recording = state.is_recording.lock().map(|v| *v).unwrap_or(false);
+                                if !is_recording {
                                     let recorder = state.recorder.lock().unwrap();
                                     if recorder.start_recording().is_ok() {
+                                        drop(recorder);
                                         *state.is_recording.lock().unwrap() = true;
                                         let _ = handle_for_keydown.emit_all("recording-status-change",
                                             serde_json::json!({"recording": true }));
@@ -1048,35 +1071,37 @@ fn main() {
                                 // F4 松开，停止录音
                                 println!("rdev: F4 松开，停止录音");
                                 let state: State<AppState> = handle_for_keyup.state();
-                                if let Ok(true) = state.is_recording.lock().map(|v| *v) {
+                                let is_recording = state.is_recording.lock().map(|v| *v).unwrap_or(false);
+                                if is_recording {
                                     let recorder = state.recorder.lock().unwrap();
-                                    if let Ok(audio_data) = recorder.stop_recording() {
-                                        *state.is_recording.lock().unwrap() = false;
+                                    let audio_data = recorder.stop_recording().unwrap_or_default();
+                                    drop(recorder);
+                                    *state.is_recording.lock().unwrap() = false;
 
-                                        // 保存录音
-                                        if !audio_data.is_empty() {
-                                            let recordings_dir = state.recordings_dir.lock().unwrap();
-                                            let id = Local::now().format("%Y%m%d_%H%M%S").to_string();
-                                            let wav_path = recordings_dir.join(format!("{}.wav", id));
-                                            let _ = recorder.save_to_wav(&audio_data, &wav_path);
-                                            let txt_path = recordings_dir.join(format!("{}.txt", id));
-                                            let _ = std::fs::write(&txt_path, "[识别中...]");
+                                    // 保存录音
+                                    if !audio_data.is_empty() {
+                                        let recordings_dir = state.recordings_dir.lock().unwrap();
+                                        let id = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                                        let wav_path = recordings_dir.join(format!("{}.wav", id));
+                                        let _ = state.recorder.lock().unwrap().save_to_wav(&audio_data, &wav_path);
+                                        let txt_path = recordings_dir.join(format!("{}.txt", id));
+                                        let _ = std::fs::write(&txt_path, "[识别中...]");
+                                        drop(recordings_dir);
 
-                                            // 触发识别
-                                            let id_clone = id.clone();
-                                            let handle_clone = handle_for_keyup.clone();
-                                            std::thread::spawn(move || {
-                                                std::thread::sleep(std::time::Duration::from_millis(500));
-                                                let state: State<AppState> = handle_clone.state();
-                                                let _ = transcribe_recording(state, id_clone);
-                                                let _ = handle_clone.emit_all("recording-saved",
-                                                    serde_json::json!({"id": id }));
-                                            });
-                                        }
-
-                                        let _ = handle_for_keyup.emit_all("recording-status-change",
-                                            serde_json::json!({"recording": false }));
+                                        // 触发识别
+                                        let id_clone = id.clone();
+                                        let handle_clone = handle_for_keyup.clone();
+                                        std::thread::spawn(move || {
+                                            std::thread::sleep(std::time::Duration::from_millis(500));
+                                            let state: State<AppState> = handle_clone.state();
+                                            let _ = transcribe_recording(state, id_clone);
+                                            let _ = handle_clone.emit_all("recording-saved",
+                                                serde_json::json!({"id": id }));
+                                        });
                                     }
+
+                                    let _ = handle_for_keyup.emit_all("recording-status-change",
+                                        serde_json::json!({"recording": false }));
                                 }
                             }
                         }
