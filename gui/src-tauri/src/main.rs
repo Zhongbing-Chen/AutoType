@@ -868,6 +868,67 @@ fn open_recording_folder(state: State<AppState>, id: String) -> Result<(), Strin
     Ok(())
 }
 
+// 删除录音文件
+#[tauri::command]
+fn delete_recording(state: State<AppState>, id: String) -> Result<(), String> {
+    let recordings_dir = state.recordings_dir.lock().map_err(|e| e.to_string())?;
+    let wav_path = recordings_dir.join(format!("{}.wav", id));
+    let txt_path = recordings_dir.join(format!("{}.txt", id));
+
+    // 删除 WAV 文件
+    if wav_path.exists() {
+        std::fs::remove_file(&wav_path).map_err(|e| format!("删除音频文件失败: {}", e))?;
+    }
+
+    // 删除 TXT 文件
+    if txt_path.exists() {
+        std::fs::remove_file(&txt_path).map_err(|e| format!("删除文本文件失败: {}", e))?;
+    }
+
+    Ok(())
+}
+
+// 应用配置结构
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct AppConfig {
+    hotkey: String,
+    hold_to_record: bool,
+    save_recordings: bool,
+    recordings_dir: String,
+    auto_transcribe: bool,
+}
+
+// 获取配置
+#[tauri::command]
+fn get_config(state: State<AppState>) -> Result<AppConfig, String> {
+    let recordings_dir = state.recordings_dir.lock().map_err(|e| e.to_string())?;
+
+    let config = AppConfig {
+        hotkey: "F4".to_string(),
+        hold_to_record: true,
+        save_recordings: true,
+        recordings_dir: recordings_dir.to_string_lossy().to_string(),
+        auto_transcribe: true,
+    };
+
+    Ok(config)
+}
+
+// 更新配置
+#[tauri::command]
+fn update_config(state: State<AppState>, new_config: AppConfig) -> Result<(), String> {
+    // 更新录音目录
+    if !new_config.recordings_dir.is_empty() {
+        let new_path = PathBuf::from(&new_config.recordings_dir);
+        if new_path.exists() || std::fs::create_dir_all(&new_path).is_ok() {
+            let mut recordings_dir = state.recordings_dir.lock().map_err(|e| e.to_string())?;
+            *recordings_dir = new_path;
+        }
+    }
+
+    Ok(())
+}
+
 // 启动 Node.js ASR 服务
 fn start_nodejs_service() {
     use std::process::{Command, Stdio};
@@ -935,7 +996,10 @@ fn main() {
             get_recordings_dir,
             check_audio_devices,
             open_recording_folder,
-            get_audio_amplitude
+            get_audio_amplitude,
+            delete_recording,
+            get_config,
+            update_config
         ])
         .setup(|app| {
             // 注册全局快捷键 F4
