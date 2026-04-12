@@ -1,7 +1,7 @@
 {
   "build": {
-    "beforeDevCommand": "npx vite",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "cd .. && npx vite",
+    "beforeBuildCommand": "cd .. && npm run build",
     "devPath": "http://localhost:1420",
     "distDir": "../dist"
   },
@@ -68,7 +68,7 @@
       },
       "resources": [],
       "shortDescription": "语音转文字工具",
-      "targets": ["nsis", "msi"],
+      "targets": ["msi"],
       "windows": {
         "certificateThumbprint": null,
         "digestAlgorithm": "sha256",
