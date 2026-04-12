@@ -1005,65 +1005,33 @@ fn main() {
             update_config
         ])
         .setup(|app| {
-            // 注册全局快捷键 F4
-            let handle = app.handle();
-            let mut shortcut_manager = app.global_shortcut_manager();
-
-            // 尝试注册 F4，失败则尝试 F2/F3 作为备用
-            let f4_result = shortcut_manager.register("F4", move || {
-                println!("快捷键 F4 被按下");
-                let state: State<AppState> = handle.state();
-                match toggle_recording(state) {
-                    Ok(is_recording) => {
-                        println!("快捷键 F4: 录音状态切换为 {}", is_recording);
-                        // 发送事件到前端更新 UI
-                        if let Err(e) = handle.emit_all("recording-status-change", serde_json::json!({
-                            "recording": is_recording
-                        })) {
-                            eprintln!("发送事件失败: {}", e);
-                        } else {
-                            println!("事件已发送: recording-status-change, recording={}", is_recording);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("快捷键 F4: 切换录音状态失败: {}", e);
-                    }
+            // F4 由 rdev 处理（按住录音模式），这里只注册备用快捷键 F2/F3
+            // 避免 F4 被重复触发导致识别两次
+            let handle2 = app.handle();
+            match app.global_shortcut_manager().register("F2", move || {
+                let state: State<AppState> = handle2.state();
+                if let Ok(is_recording) = toggle_recording(state) {
+                    println!("快捷键 F2 触发，录音状态: {}", is_recording);
+                    let _ = handle2.emit_all("recording-status-change", serde_json::json!({
+                        "recording": is_recording
+                    }));
                 }
-            });
+            }) {
+                Ok(_) => println!("✓ 全局快捷键 F2 已注册"),
+                Err(e2) => {
+                    println!("✗ 无法注册 F2: {}", e2);
+                    println!("  尝试注册 F3...");
 
-            match f4_result {
-                Ok(_) => println!("✓ 全局快捷键 F4 已注册"),
-                Err(e) => {
-                    println!("✗ 无法注册 F4: {}", e);
-                    println!("  尝试注册 F2 作为备用...");
-
-                    let handle2 = app.handle();
-                    match app.global_shortcut_manager().register("F2", move || {
-                        let state: State<AppState> = handle2.state();
+                    let handle3 = app.handle();
+                    let _ = app.global_shortcut_manager().register("F3", move || {
+                        let state: State<AppState> = handle3.state();
                         if let Ok(is_recording) = toggle_recording(state) {
-                            println!("快捷键 F2 触发，录音状态: {}", is_recording);
-                            let _ = handle2.emit_all("recording-status-change", serde_json::json!({
+                            println!("快捷键 F3 触发，录音状态: {}", is_recording);
+                            let _ = handle3.emit_all("recording-status-change", serde_json::json!({
                                 "recording": is_recording
                             }));
                         }
-                    }) {
-                        Ok(_) => println!("✓ 全局快捷键 F2 已注册（备用）"),
-                        Err(e2) => {
-                            println!("✗ 也无法注册 F2: {}", e2);
-                            println!("  尝试注册 F3...");
-
-                            let handle3 = app.handle();
-                            let _ = app.global_shortcut_manager().register("F3", move || {
-                                let state: State<AppState> = handle3.state();
-                                if let Ok(is_recording) = toggle_recording(state) {
-                                    println!("快捷键 F3 触发，录音状态: {}", is_recording);
-                                    let _ = handle3.emit_all("recording-status-change", serde_json::json!({
-                                        "recording": is_recording
-                                    }));
-                                }
-                            });
-                        }
-                    }
+                    });
                 }
             }
 
