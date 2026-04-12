@@ -41,14 +41,14 @@ async function setupEventListeners() {
     updateRecordingUI();
 
     if (!recording) {
-      // 录音停止，准备识别
+      // 录音停止
       resultDiv.textContent = '正在识别...';
       copyBtn.style.display = 'none';
 
-      // 等待识别完成
+      // 等待一小段时间让后端保存文件，然后触发识别
       setTimeout(async () => {
         await loadRecordings();
-        // 识别最新的一条
+        // 识别最新的一条（触发自动输入）
         const recordings = await invoke('get_recordings');
         if (recordings.length > 0) {
           const latest = recordings[0];
@@ -176,7 +176,7 @@ async function toggleRecording() {
       // 等待识别完成
       setTimeout(async () => {
         await loadRecordings();
-        // 识别最新的一条
+        // 识别最新的一条（触发自动输入）
         const recordings = await invoke('get_recordings');
         if (recordings.length > 0) {
           const latest = recordings[0];

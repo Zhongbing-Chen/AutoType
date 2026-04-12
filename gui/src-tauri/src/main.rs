@@ -1174,16 +1174,9 @@ fn main() {
                                         let _ = std::fs::write(&txt_path, "[识别中...]");
                                         drop(recordings_dir);
 
-                                        // 触发识别
-                                        let id_clone = id.clone();
-                                        let handle_clone = handle_for_keyup.clone();
-                                        std::thread::spawn(move || {
-                                            std::thread::sleep(std::time::Duration::from_millis(500));
-                                            let state: State<AppState> = handle_clone.state();
-                                            let _ = transcribe_recording(state, id_clone);
-                                            let _ = handle_clone.emit_all("recording-saved",
-                                                serde_json::json!({"id": id }));
-                                        });
+                                        // 识别由前端处理，这里只通知前端录音已保存
+                                    let _ = handle_for_keyup.emit_all("recording-saved",
+                                        serde_json::json!({"id": id }));
                                     }
 
                                     let _ = handle_for_keyup.emit_all("recording-status-change",
