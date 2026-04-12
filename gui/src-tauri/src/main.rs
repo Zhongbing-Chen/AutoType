@@ -488,6 +488,8 @@ fn get_recordings(state: State<AppState>) -> Result<Vec<RecordingItem>, String> 
     let recordings_dir = state.recordings_dir.lock().map_err(|e| e.to_string())?;
     let mut items = Vec::new();
 
+    println!("[DEBUG] 读取录音目录: {:?}", *recordings_dir);
+
     if let Ok(entries) = std::fs::read_dir(&*recordings_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -524,6 +526,7 @@ fn get_recordings(state: State<AppState>) -> Result<Vec<RecordingItem>, String> 
 
     // 按时间倒序排列
     items.sort_by(|a, b| b.id.cmp(&a.id));
+    println!("[DEBUG] 找到 {} 个WAV文件，返回 {} 条历史记录", items.len(), items.len());
     Ok(items)
 }
 

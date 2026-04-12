@@ -246,23 +246,40 @@ async function transcribeAudio(id, auto = false) {
 // 加载历史记录
 async function loadRecordings() {
   try {
+    console.log('正在加载历史记录...');
     const recordings = await invoke('get_recordings');
+    console.log('获取到历史记录:', recordings.length, '条');
     renderHistory(recordings);
   } catch (err) {
     console.error('加载历史记录失败:', err);
+    alert('加载历史记录失败: ' + err);
   }
 }
 
 // 渲染历史记录
 function renderHistory(recordings) {
-  if (!historyList) return;
+  console.log('renderHistory called with', recordings.length, 'items');
+  // 调试：显示在页面上
+  if (historyList) {
+    historyList.setAttribute('data-debug-count', recordings.length);
+  }
 
-  if (recordings.length === 0) {
-    historyList.innerHTML = '<div class="empty">暂无录音记录</div>';
+  if (!historyList) {
+    console.error('historyList element not found!');
+    alert('错误：找不到 historyList 元素');
     return;
   }
 
-  historyList.innerHTML = recordings.map(item => `
+  if (recordings.length === 0) {
+    console.log('No recordings, showing empty message');
+    historyList.innerHTML = '<div class="empty">暂无录音记录 (debug: 0 items)</div>';
+    return;
+  }
+
+  // 调试信息
+  const debugHeader = `<div style="color: #3b82f6; padding: 8px; border-bottom: 1px solid #334155; margin-bottom: 8px;">找到 ${recordings.length} 条录音记录</div>`;
+
+  historyList.innerHTML = debugHeader + recordings.map(item => `
     <div class="history-item" data-id="${item.id}">
       <div class="history-header">
         <span class="timestamp">${item.timestamp}</span>
