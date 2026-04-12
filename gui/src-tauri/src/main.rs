@@ -252,6 +252,8 @@ mod audio {
             let final_buffer_stream = final_buffer.clone();
             let sample_count_stream = sample_count.clone();
             let amp_sender_stream = amp_sender.clone();
+            let is_stream_error = Arc::new(AtomicBool::new(false));
+            let is_stream_error_stream = is_stream_error.clone();
 
             // 重采样状态：相位累积
             let mut phase: f64 = 0.0;
@@ -315,7 +317,10 @@ mod audio {
                         }
                     }
                 },
-                |err| eprintln!("音频流错误: {}", err),
+                move |err| {
+                    eprintln!("音频流错误: {}", err);
+                    is_stream_error_stream.store(true, Ordering::SeqCst);
+                },
                 Some(std::time::Duration::from_millis(1000)),
             ) {
                 Ok(s) => s,
@@ -332,6 +337,8 @@ mod audio {
             loop {
                 match cmd_receiver.recv() {
                     Ok(AudioCommand::Start) => {
+                        // 重置错误状态
+                        is_stream_error.store(false, Ordering::SeqCst);
                         if let Ok(mut buffer) = final_buffer.lock() {
                             buffer.clear();
                         }
@@ -351,8 +358,15 @@ mod audio {
                             Vec::new()
                         };
 
-                        println!("音频线程: 录音停止，{} 样本 ({}秒)",
-                            recorded.len(), recorded.len() / 16000);
+                        // 检查是否有音频流错误
+                        let had_error = is_stream_error.load(Ordering::SeqCst);
+                        if had_error {
+                            eprintln!("音频线程: 录音停止（音频流曾出错），{} 样本 ({}秒)",
+                                recorded.len(), recorded.len() / 16000);
+                        } else {
+                            println!("音频线程: 录音停止，{} 样本 ({}秒)",
+                                recorded.len(), recorded.len() / 16000);
+                        }
 
                         if data_sender.try_send(recorded).is_err() {
                             let _ = data_sender.try_send(Vec::new());
@@ -380,10 +394,7 @@ mod audio {
         }
 
         pub fn stop_recording(&self) -> Result<Vec<i16>, String> {
-            if !self.is_recording() {
-                return Ok(Vec::new());
-            }
-
+            // 清除之前的数据
             while self.data_receiver.try_recv().is_ok() {}
 
             self.cmd_sender.send(AudioCommand::Stop)
@@ -1005,34 +1016,62 @@ fn main() {
             update_config
         ])
         .setup(|app| {
-            // F4 由 rdev 处理（按住录音模式），这里只注册备用快捷键 F2/F3
-            // 避免 F4 被重复触发导致识别两次
-            let handle2 = app.handle();
-            match app.global_shortcut_manager().register("F2", move || {
-                let state: State<AppState> = handle2.state();
-                if let Ok(is_recording) = toggle_recording(state) {
-                    println!("快捷键 F2 触发，录音状态: {}", is_recording);
-                    let _ = handle2.emit_all("recording-status-change", serde_json::json!({
-                        "recording": is_recording
-                    }));
+            // 使用 Tauri GlobalShortcutManager 注册 F4（Toggle 模式）
+            // 比 rdev 更可靠，能在所有应用中捕获快捷键
+            let handle = app.handle();
+            match app.global_shortcut_manager().register("F4", move || {
+                let state: State<AppState> = handle.state();
+                let is_recording = state.is_recording.lock().map(|v| *v).unwrap_or(false);
+
+                if !is_recording {
+                    // 开始录音
+                    println!("快捷键 F4：开始录音");
+                    let recorder = state.recorder.lock().unwrap();
+                    if recorder.start_recording().is_ok() {
+                        drop(recorder);
+                        *state.is_recording.lock().unwrap() = true;
+                        let _ = handle.emit_all("recording-status-change",
+                            serde_json::json!({"recording": true }));
+                    }
+                } else {
+                    // 停止录音
+                    println!("快捷键 F4：停止录音");
+                    let recorder = state.recorder.lock().unwrap();
+                    let audio_data = recorder.stop_recording().unwrap_or_default();
+                    drop(recorder);
+                    *state.is_recording.lock().unwrap() = false;
+
+                    // 保存录音
+                    let recordings_dir = state.recordings_dir.lock().unwrap();
+                    let id = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                    let wav_path = recordings_dir.join(format!("{}.wav", id));
+                    let txt_path = recordings_dir.join(format!("{}.txt", id));
+
+                    if !audio_data.is_empty() {
+                        // 保存音频文件
+                        if let Ok(_) = state.recorder.lock().unwrap().save_to_wav(&audio_data, &wav_path) {
+                            let _ = std::fs::write(&txt_path, "[识别中...]");
+                            println!("录音保存到: {:?}", wav_path);
+
+                            // 识别由前端处理，这里只通知前端录音已保存
+                            let _ = handle.emit_all("recording-saved",
+                                serde_json::json!({"id": id }));
+                        } else {
+                            eprintln!("保存录音文件失败");
+                        }
+                    } else {
+                        // 音频数据为空
+                        let _ = std::fs::write(&txt_path, "[录音失败：无音频数据]");
+                        eprintln!("录音数据为空，可能是音频设备断开");
+                    }
+                    drop(recordings_dir);
+
+                    let _ = handle.emit_all("recording-status-change",
+                        serde_json::json!({"recording": false }));
                 }
             }) {
-                Ok(_) => println!("✓ 全局快捷键 F2 已注册"),
-                Err(e2) => {
-                    println!("✗ 无法注册 F2: {}", e2);
-                    println!("  尝试注册 F3...");
-
-                    let handle3 = app.handle();
-                    let _ = app.global_shortcut_manager().register("F3", move || {
-                        let state: State<AppState> = handle3.state();
-                        if let Ok(is_recording) = toggle_recording(state) {
-                            println!("快捷键 F3 触发，录音状态: {}", is_recording);
-                            let _ = handle3.emit_all("recording-status-change", serde_json::json!({
-                                "recording": is_recording
-                            }));
-                        }
-                    });
-                }
+                Ok(_) => println!("✓ 全局快捷键 F4 已注册（Toggle 模式）"),
+                Err(e) => eprintln!("✗ 无法注册 F4 快捷键: {}", e),
             }
 
             // 创建桌面悬浮窗口（用于显示声纹）
@@ -1090,74 +1129,6 @@ fn main() {
             } else if let Err(e) = overlay_window {
                 eprintln!("创建悬浮窗口失败: {}", e);
             }
-
-            // 使用 rdev 监听 F4 按住/松开（实现按住录音模式）
-            let handle = app.handle();
-            std::thread::spawn(move || {
-                use rdev::{listen, EventType, Key};
-
-                let handle_for_keydown = handle.clone();
-                let handle_for_keyup = handle.clone();
-                let mut is_pressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let is_pressed_clone = is_pressed.clone();
-
-                if let Err(e) = listen(move |event| {
-                    match event.event_type {
-                        EventType::KeyPress(Key::F4) => {
-                            if !is_pressed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                // F4 刚按下，开始录音
-                                println!("rdev: F4 按下，开始录音");
-                                let state: State<AppState> = handle_for_keydown.state();
-                                let is_recording = state.is_recording.lock().map(|v| *v).unwrap_or(false);
-                                if !is_recording {
-                                    let recorder = state.recorder.lock().unwrap();
-                                    if recorder.start_recording().is_ok() {
-                                        drop(recorder);
-                                        *state.is_recording.lock().unwrap() = true;
-                                        let _ = handle_for_keydown.emit_all("recording-status-change",
-                                            serde_json::json!({"recording": true }));
-                                    }
-                                }
-                            }
-                        }
-                        EventType::KeyRelease(Key::F4) => {
-                            if is_pressed.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                                // F4 松开，停止录音
-                                println!("rdev: F4 松开，停止录音");
-                                let state: State<AppState> = handle_for_keyup.state();
-                                let is_recording = state.is_recording.lock().map(|v| *v).unwrap_or(false);
-                                if is_recording {
-                                    let recorder = state.recorder.lock().unwrap();
-                                    let audio_data = recorder.stop_recording().unwrap_or_default();
-                                    drop(recorder);
-                                    *state.is_recording.lock().unwrap() = false;
-
-                                    // 保存录音
-                                    if !audio_data.is_empty() {
-                                        let recordings_dir = state.recordings_dir.lock().unwrap();
-                                        let id = Local::now().format("%Y%m%d_%H%M%S").to_string();
-                                        let wav_path = recordings_dir.join(format!("{}.wav", id));
-                                        let _ = state.recorder.lock().unwrap().save_to_wav(&audio_data, &wav_path);
-                                        let txt_path = recordings_dir.join(format!("{}.txt", id));
-                                        let _ = std::fs::write(&txt_path, "[识别中...]");
-                                        drop(recordings_dir);
-
-                                        // 识别由前端处理，这里只通知前端录音已保存
-                                    let _ = handle_for_keyup.emit_all("recording-saved",
-                                        serde_json::json!({"id": id }));
-                                    }
-
-                                    let _ = handle_for_keyup.emit_all("recording-status-change",
-                                        serde_json::json!({"recording": false }));
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }) {
-                    eprintln!("rdev 监听失败: {:?}", e);
-                }
-            });
 
             Ok(())
         })

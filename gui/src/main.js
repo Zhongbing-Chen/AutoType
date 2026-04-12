@@ -151,12 +151,12 @@ function updateRecordingUI() {
   if (isRecording) {
     recordingIndicator.classList.add('recording');
     recordingIndicator.querySelector('.recording-status').textContent = '正在录音';
-    recordingIndicator.querySelector('.recording-hint').textContent = '点击或按 F4 停止并识别';
+    recordingIndicator.querySelector('.recording-hint').textContent = '点击或按 F4 停止录音';
     startWaveformVisualization();
   } else {
     recordingIndicator.classList.remove('recording');
     recordingIndicator.querySelector('.recording-status').textContent = '就绪';
-    recordingIndicator.querySelector('.recording-hint').textContent = '点击或按 F4 开始录音';
+    recordingIndicator.querySelector('.recording-hint').textContent = '点击或按 F4 开始/停止录音';
     stopWaveformVisualization();
   }
 }

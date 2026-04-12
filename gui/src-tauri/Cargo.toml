@@ -1,8 +1,8 @@
 [package]
-name = "vocotype-gui"
+name = "autotype-gui"
 version = "1.0.0"
-description = "VocoType - 语音转文字"
-authors = ["vocotype"]
+description = "AutoType - 语音转文字"
+authors = ["autotype"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.69"
@@ -12,7 +12,7 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "lib"]
 
 [[bin]]
-name = "vocotype-gui"
+name = "autotype-gui"
 path = "src/main.rs"
 
 [build-dependencies]

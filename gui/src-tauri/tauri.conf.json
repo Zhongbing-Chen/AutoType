@@ -45,7 +45,7 @@
     "bundle": {
       "active": true,
       "category": "Productivity",
-      "copyright": "VocoType",
+      "copyright": "AutoType",
       "deb": {
         "depends": []
       },
@@ -57,8 +57,8 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
-      "identifier": "com.vocotype.app",
-      "longDescription": "VocoType - 语音转文字工具，支持快捷键录音、实时识别",
+      "identifier": "com.autotype.app",
+      "longDescription": "AutoType - 语音转文字工具，支持快捷键录音、实时识别",
       "macOS": {
         "entitlements": null,
         "exceptionDomain": "",
@@ -95,7 +95,7 @@
         "fullscreen": false,
         "height": 600,
         "resizable": true,
-        "title": "VocoType",
+        "title": "AutoType",
         "width": 400,
         "center": true,
         "visible": true

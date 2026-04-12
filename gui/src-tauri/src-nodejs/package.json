@@ -1,7 +1,7 @@
 {
-  "name": "vocotype-asr-service",
+  "name": "autotype-asr-service",
   "version": "1.0.0",
-  "description": "VocoType ASR Service - Node.js wrapper for FunASR Python",
+  "description": "AutoType ASR Service - Node.js wrapper for FunASR Python",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
